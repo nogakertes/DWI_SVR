@@ -135,6 +135,11 @@ def create_motion_case(path_to_scan, num_of_directions=10, return_json_path = Fa
     affine_path = os.path.join(path_to_scan,'affines_for_torch.pt')
     affine_matrices = torch.load(affine_path)
 
+    # Load volume indices for motion
+    vol_indices_path = os.path.join(path_to_scan, f'rnd_vol_indices_for_{num_of_directions}_dirs.txt')
+    with open(vol_indices_path, "r") as f:
+        rnd_indices = [int(float(line.strip())) for line in f if line.strip()]
+
     # Load scans
     dw_images = []
     masks = []
@@ -163,19 +168,17 @@ def create_motion_case(path_to_scan, num_of_directions=10, return_json_path = Fa
     
     # Create motion volume by stacking slices from multiple scans
     stack_indices = []
-
+    count = 0
     for j in range(num_stacks_in_vol):
         stack_indices = torch.arange(j, dw_data.shape[2], num_stacks_in_vol)
         stacks_indices.append(stack_indices)
-        # for v in range(dw_data.shape[-1]):
-        #     rnd_scan = np.random.randint(0, 5)
-        #     motion_dwi_data[..., stack_indices, v] = dw_images[rnd_scan][..., stack_indices, v]
-        #     motion_mask_data[..., stack_indices] = masks[rnd_scan][..., stack_indices]
-        motion_dwi_data[..., stack_indices, :] = dw_images[j][..., stack_indices, :]
-        motion_mask_data[..., stack_indices] = masks[j][..., stack_indices]
-        # if j < 4:
-        #     transform = affine_matrices[('scan1', f'scan{j+2}')]
-            # motion_transformations.append(torch.tensor(transform))
+        for v in range(dw_data.shape[-1]):
+            motion_dwi_data[..., stack_indices, v] = dw_images[rnd_indices[count]][..., stack_indices, v]
+            motion_mask_data[..., stack_indices] = masks[rnd_indices[count]][..., stack_indices]
+            count+=1
+        # motion_dwi_data[..., stack_indices, :] = dw_images[j][..., stack_indices, :]
+        # motion_mask_data[..., stack_indices] = masks[j][..., stack_indices]
+
     output = [motion_dwi_data, T1_image,  bvals, bvecs, affine_matrices, motion_mask_data, stacks_indices]
     if  return_json_path:
         output.append(json_file_path)
@@ -239,10 +242,12 @@ class realSimulationSVRDataset(Dataset):
          
 
         if self.transform:
+            # get factor to normalized the b0 image:
+            factor = dwi_slices[:T1_image.shape[-1],...].mean()/ dwi_slices[T1_image.shape[-1]:,...].mean()
             dwi_stacks = [self.transform(stack) for stack in dwi_stacks]
             dwi_slices = self.transform(dwi_slices.permute(-1,0,1))
             T1_image = self.transform(T1_image)
-            dwi_slices[:80,...] = dwi_slices[:80,...]/2.5 
+            dwi_slices[:T1_image.shape[-1],...] = dwi_slices[:T1_image.shape[-1],...]/factor
 
         output = [dwi_stacks, dwi_slices, stacks_bvecs, slices_bvecs, bvals, motion_mask_data, T1_image, motion_transformations, stacks_indices]
         if self.return_corrupted_vols:

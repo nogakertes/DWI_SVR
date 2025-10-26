@@ -781,7 +781,7 @@ class ReconNet_canonial_grid(nn.Module):
             stacks_indices=stacks_indices,
             image_size=self.image_size,
             device=self.device,
-            min_coverage=0.5
+            min_coverage=2
         )
 
         return warped_list, recon_canon, consistency_loss

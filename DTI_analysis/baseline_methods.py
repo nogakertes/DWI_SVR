@@ -27,7 +27,7 @@ def dwi_fit_tensor_least_squares(nifti_path, bvecs_path, bvals_path, method='WLS
     # Load DWI data
     img = nib.load(nifti_path)
     data = img.get_fdata()
-    # INSERT_YOUR_CODE
+
     if norm_imgs:
         data_min = data.min()
         data_max = data.max()
@@ -79,5 +79,9 @@ if __name__ == "__main__":
     num=12
     bvecs_path = f'/tcmldrive/NogaK/noga_experiment_data/bvecs/bvecs_{num}.bvec'
     bvals_path = f'/tcmldrive/NogaK/noga_experiment_data/bvecs/bvals_{num}.bval'
-    dt_tensors_6, fa, md = dwi_fit_tensor_least_squares('recons.nii.gz', bvecs_path, bvals_path, method = 'WLS')
+    dt_tensors_6, fa, md = dwi_fit_tensor_least_squares('/tcmldrive/NogaK/svr_exps/multi_col_recons/multi_recon_exp_with_MI_loss_val_0.1_2025-10-26_13:45:49.401730/recons.nii.gz',
+                                                        bvecs_path, 
+                                                        bvals_path, 
+                                                        norm_imgs=True,
+                                                        method = 'WLS')
     save_tensor_as_nii(torch.tensor(fa), 'recons_fa.nii.gz')

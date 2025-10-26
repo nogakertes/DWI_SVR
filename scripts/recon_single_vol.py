@@ -60,21 +60,22 @@ if __name__ == "__main__":
                         'image_size' : torch.tensor([128, 128, 80]),
                         'voxel_size' : torch.tensor([1.758, 1.758, 1.6])}
 
-
     solver = SVR_solver(
         case_path,
         rigid_config,
         recon_config,
-        affine_matrix_path = '/tcmldrive/NogaK/svr_exps/registration_exps/final_exp_reg_GNN_2025-10-19_09:11:26.783973/pred_rigid_trans.pt',
+        affine_matrix_path = '/tcmldrive/NogaK/svr_exps/registration_exps/gnn_hyperparam_hidden64_heads8_layers4_drop0.001_2025-10-19_16:37:47.767831/pred_rigid_trans.pt',
         only_canon_grid=True,
         full_sim_ds=False,
         lr=0.002,
         plot_every=100,
         vol_to_opt=1,
         vol_indices=bvec_indices,
-        loss_weights={'recon_loss': 1, 'tv_reg': 0.03, 'dc_loss': 0.05, 'curv': 0.005},
+        loss_weights={'recon_loss': 1, 'tv_reg': 0.05, 'dc_loss': 1, 'curv': 0.05},
         save_exp_path='/tcmldrive/NogaK/svr_exps/',
-        exp_name='debug',
-        device=device
+        exp_name='recon_with_inv_theta_in_dc_loss1_min_coverage2',
+        device=device 
             )
     solver.fit(N_iter=5000)
+
+

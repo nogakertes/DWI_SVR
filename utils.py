@@ -30,27 +30,126 @@ def tv3d(x: torch.Tensor) -> torch.Tensor:
     dx = (x[:, 1:, :, :] - x[:, :-1, :, :]).abs().mean()
     dy = (x[:, :, 1:, :] - x[:, :, :-1, :]).abs().mean()
     dz = (x[:, :, :, 1:] - x[:, :, :, :-1]).abs().mean()
+    # return dx + dy + dz
     return dx + dy + dz
 
-def _laplacian_3d(x: torch.Tensor) -> torch.Tensor:
-    """
-    Compute 3D Laplacian with 6-neighborhood stencil.
-    Args: x: [D,H,W]
-    Returns: [D,H,W]
-    """
-    x4d = x.unsqueeze(0).unsqueeze(0)  # [1,1,D,H,W]
-    k = torch.tensor(
-        [[[[0,0,0],[0,1,0],[0,0,0]],
-          [[0,1,0],[1,-6,1],[0,1,0]],
-          [[0,0,0],[0,1,0],[0,0,0]]]],
-        dtype=x4d.dtype, device=x4d.device)
-    y = F.conv3d(x4d, k.unsqueeze(0), padding=1)
-    return y[0,0]
 
-def curvature_loss(volume_dhw: torch.Tensor) -> torch.Tensor:
-    """Squared Laplacian (curvature) loss for a single 3D volume [D,H,W]."""
-    lap = _laplacian_3d(volume_dhw)
-    return (lap * lap).mean()
+import torch
+import torch.nn.functional as F
+from typing import Tuple, Union
+
+def _parse_spacing(spacing: Union[float, Tuple[float, float, float], None],
+                   device, dtype) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Returns inverse-squared spacings (1/dz^2, 1/dy^2, 1/dx^2) as tensors on the right device/dtype.
+    """
+    if spacing is None:
+        dz = dy = dx = 1.0
+    elif isinstance(spacing, (int, float)):
+        dz = dy = dx = float(spacing)
+    else:
+        assert len(spacing) == 3, "spacing must be scalar, None, or a 3-tuple (dz, dy, dx)"
+        dz, dy, dx = map(float, spacing)
+
+    inv_dz2 = torch.tensor(1.0 / (dz * dz), device=device, dtype=dtype)
+    inv_dy2 = torch.tensor(1.0 / (dy * dy), device=device, dtype=dtype)
+    inv_dx2 = torch.tensor(1.0 / (dx * dx), device=device, dtype=dtype)
+    return inv_dz2, inv_dy2, inv_dx2
+
+
+def _laplacian_3d(x: torch.Tensor,
+                  spacing: Union[float, Tuple[float, float, float], None] = None) -> torch.Tensor:
+    """
+    3D Laplacian (6-neighborhood) with anisotropic voxel spacing.
+
+    Args
+    ----
+    x : torch.Tensor
+        [B, D, H, W]  or  [B, C, D, H, W]
+    spacing : float | (dz, dy, dx) | None
+        Voxel sizes along depth (D=z), height (H=y), width (W=x).
+        If None -> isotropic spacing = 1.
+
+    Returns
+    -------
+    torch.Tensor
+        Same shape as input.
+    """
+    added_channel = False
+
+    if x.dim() == 4:            # [B, D, H, W] -> add channel
+        x4d = x.unsqueeze(1)    # [B, 1, D, H, W]
+        C = 1
+        added_channel = True
+    elif x.dim() == 5:          # [B, C, D, H, W]
+        x4d = x
+        C = x4d.size(1)
+    else:
+        raise ValueError(f"Expected 4D [B,D,H,W] or 5D [B,C,D,H,W], got {tuple(x.shape)}")
+
+    inv_dz2, inv_dy2, inv_dx2 = _parse_spacing(spacing, x4d.device, x4d.dtype)
+
+    # Discrete anisotropic Laplacian:
+    # center = -2*(1/dx^2 + 1/dy^2 + 1/dz^2)
+    # neighbors (±x, ±y, ±z) = 1/dx^2, 1/dy^2, 1/dz^2 respectively
+    k = x4d.new_zeros((1, 1, 3, 3, 3))
+    k[0, 0, 1, 1, 1] = -2.0 * (inv_dx2 + inv_dy2 + inv_dz2)  # center
+    # z neighbors (depth, D)
+    k[0, 0, 0, 1, 1] =  inv_dz2
+    k[0, 0, 2, 1, 1] =  inv_dz2
+    # y neighbors (height, H)
+    k[0, 0, 1, 0, 1] =  inv_dy2
+    k[0, 0, 1, 2, 1] =  inv_dy2
+    # x neighbors (width, W)
+    k[0, 0, 1, 1, 0] =  inv_dx2
+    k[0, 0, 1, 1, 2] =  inv_dx2
+
+    # Depthwise per-channel conv
+    weight = k.repeat(C, 1, 1, 1, 1)  # [C,1,3,3,3]
+    y = F.conv3d(x4d, weight, padding=1, groups=C)
+
+    return y[:, 0] if added_channel else y
+
+
+def curvature_loss(volumes: torch.Tensor,
+                   spacing: Union[float, Tuple[float, float, float], None] = None,
+                   reduction: str = "mean") -> torch.Tensor:
+    """
+    Squared-Laplacian (curvature) loss for a BATCH of 3D volumes with anisotropic spacing.
+
+    Args
+    ----
+    volumes : torch.Tensor
+        [B, D, H, W]  or  [B, C, D, H, W]
+    spacing : float | (dz, dy, dx) | None
+        Voxel sizes along (D=z, H=y, W=x). If None -> isotropic spacing = 1.
+    reduction : "mean" | "none" | "batch"
+        - "mean": single scalar over all dims and batch (default)
+        - "batch": per-sample scalar, averaged over channels & voxels -> shape [B]
+        - "none": return Laplacian^2 tensor (same shape as input)
+
+    Returns
+    -------
+    torch.Tensor
+        Loss according to `reduction`.
+    """
+    lap = _laplacian_3d(volumes, spacing=spacing)
+    sq = lap * lap
+
+    if reduction == "none":
+        return sq
+
+    if reduction == "batch":
+        if volumes.dim() == 4:
+            B = volumes.size(0)
+            return sq.view(B, -1).mean(dim=1)
+        else:
+            B = volumes.size(0)
+            return sq.view(B, -1).mean(dim=1)
+
+    # default: "mean"
+    return sq.mean()
+
 
 def mask_aware_consistency(
     canon_from_stacks: torch.Tensor,   # [N,D,H,W] values in canonical
@@ -67,9 +166,9 @@ def mask_aware_consistency(
     warps them to canonical using `theta_grid_c2s`, then computes a
     coverage-weighted variance in canonical.
     """
+
     D, H, W = image_size
     N = theta_grid_c2s.shape[0]
-
     canon_masks = []
     for i in range(N):
         mask_stack = torch.zeros((D, H, W), device=device, dtype=torch.float32)
@@ -99,8 +198,6 @@ def get_inverse_transformation(affine_mat):
     inv_affine_mat[:,:3,:3] = rotation_mat
     inv_affine_mat[:,:-1, 3] = translation_vector
     return inv_affine_mat
-
-
 
 def extract_rigid_parameters(transform_matrix):
     """extract the rotation and translation parameters from the transformation matrix
@@ -599,7 +696,7 @@ def apply_rigid_trans_slice2stacks(slice_rigid_trans, dwi_stacks, stacks_indices
             grid = torch.nn.functional.affine_grid(inv_mat[:,:-1,:], (1, 1 , stack.shape[0],  stack.shape[1],  stack.shape[2]), align_corners=True)
 
             # grid = torch.nn.functional.affine_grid(cur_stack_rigid_trans[:-1,:].unsqueeze(0), (1, 1 , stack.shape[0],  stack.shape[1],  stack.shape[2]), align_corners=True)
-            transformed_stack = torch.nn.functional.grid_sample(stack.unsqueeze(0).unsqueeze(0), grid, align_corners=False)
+            transformed_stack = torch.nn.functional.grid_sample(stack.unsqueeze(0).unsqueeze(0), grid, align_corners=True)
             trans_stacks.append(transformed_stack.detach().squeeze())
             stack_rigid_trans.append(cur_stack_rigid_trans.detach().squeeze())
             if calc_reg_MI:

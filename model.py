@@ -7,7 +7,7 @@ from torch_geometric.nn import MessagePassing
 from torch_geometric.nn import GCNConv
 from torch_geometric.utils import add_self_loops
 import tinycudann as tcnn
-
+from GNNs import GlobalLocalGNN, GINGNN
 from utils import *
 
 
@@ -143,8 +143,7 @@ class AttnRegGNN(nn.Module):
             nn.Linear(hidden, out_dim)
         )
 
-    def forward(self, x, edge_index, edge_attr, layer_to_slice_features = -1):
-        assert layer_to_slice_features<len(self.convs), f'layer_to_slice_features is set to {layer_to_slice_features}, but there are only {len(self.convs)} layers'
+    def forward(self, x, edge_index, edge_attr):
         outs = []
 
         for conv, norm in zip(self.convs, self.norms):
@@ -155,8 +154,6 @@ class AttnRegGNN(nn.Module):
             outs.append(h)
             x = h
         x = self.jk(outs)         
-        if layer_to_slice_features != -1:
-            return  self.head(x), outs[layer_to_slice_features]   
         out = self.head(x)          # [N, hidden*layers]
         return out[:,:6], out[:,6:]
 
@@ -233,6 +230,7 @@ class RegNet_slice(nn.Module):
         # self.GNN = regGNN(in_channels=stack_features_size+vol_features_size, edge_dim=1, hidden_dims=hidden_dims, num_layers=len(hidden_dims))
         if use_GNN:
             self.model = AttnRegGNN(in_channels=stack_features_size+vol_features_size, edge_dim=1, **GNN_args).to(dtype)
+
         else:
             self.model = SliceFeaturesEncoder(input_dim=stack_features_size+vol_features_size).to(dtype)
         self.rigid_parameters_ranges = rigid_config['ranges']
@@ -242,7 +240,6 @@ class RegNet_slice(nn.Module):
         self.device = device
         self.use_GNN = use_GNN
         self.dtype = dtype
-        self.layer_to_slice_emb = -1#layer_to_slice_emb
 
     def forward(self, dwi_slices, T1_vol, q_space, stack_indices, output_slice_features = True, epoch=-1):
 
@@ -255,7 +252,7 @@ class RegNet_slice(nn.Module):
         if  self.use_GNN:
             edge_index, edge_attr  = sparse_a_matrix(q_space, self.voxel_size[-1], stack_indices, self.image_size, k=8)
             edge_attr = edge_attr.unsqueeze(1)
-            rigid_params, GNN_slice_features  = self.model(com_features.squeeze(1), edge_index, edge_attr.to(self.dtype), self.layer_to_slice_emb)
+            rigid_params, GNN_slice_features  = self.model(com_features.squeeze(1), edge_index, edge_attr.to(self.dtype))
         else:
             rigid_params = self.model(com_features)
 

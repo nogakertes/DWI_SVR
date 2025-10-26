@@ -15,28 +15,28 @@ import tinycudann as tcnn
 from monai.losses.image_dissimilarity import GlobalMutualInformationLoss
 from torch.utils.tensorboard import SummaryWriter
 from utils import  *
-from real_motion_simulations.prepare_experiment_svr import SingleVolSVR
+from real_motion_simulations.prepare_experiment_svr import SingleVolSVR, realSimulationSVRDataset
 
  
 
 class SVR_solver():
     def __init__(self, 
                  path_to_ds, 
-                 rigid_config,  
                  recon_config, 
+                 rigid_config, 
                  lr=0.0001, 
                  full_sim_ds = False,
-                 only_canon_grid = False,
+                 affine_matrix_path = None,
+                 num_of_directions=12,
+                 predefined_indices=None,
                  motion_simulation = True, 
-                 vol_to_opt = 0,
                  tensorboard=True,
                  save_exp_path = None,
                  plot_every = None,
-                 loss_weights = {'recon_loss' : 1, 'tv_reg' : 0.1, 'dc_loss' : 0.05, 'curv': 0.005},
+                 loss_weights = {'recon_loss' : 1, 'tv_reg' : 0.1, 'dc_loss' : 0.05, 'curv': 0.005, 'MI_loss':0.01},
                  exp_name = '_zero_shot_SVR',
                  device = 'cpu'):
         
-        self.only_canon_grid = only_canon_grid
         self.full_sim_ds = full_sim_ds
         # self.input_stacks = input_stacks
         # Load tensorboard
@@ -48,12 +48,13 @@ class SVR_solver():
             self.writer.add_text("Config/loss_weights", pprint.pformat(loss_weights))
 
         # Load the models
-        if only_canon_grid:
-            self.model = ReconNet_canonial_grid(recon_config, image_size=rigid_config['image_size'], device = device) 
-        else:
-            self.model = ReconNet(recon_config, image_size=rigid_config['image_size'], device = device)  
-        self.rigid_trans_for_recon = torch.load('pred_rigid_trans.pt')[vol_to_opt::13,...].to(device)
- 
+        self.model = ReconNet_canonial_grid(recon_config, 
+                                            image_size=rigid_config['image_size'], 
+                                            n_vols=num_of_directions+1, 
+                                            device = device) 
+        self.rigid_trans_for_recon = torch.load(affine_matrix_path).to(device)
+
+
 
         self.model.to(device)
         self.model.train()
@@ -67,16 +68,19 @@ class SVR_solver():
                                                         rigid_stats=rigid_config['ranges'], 
                                                         voxel_size=rigid_config['voxel_size'],                                                        transform=transforms.Compose([ to_float32, ZScoreNormalize3D()] ))
         else:
-            self.dataset = SingleVolSVR(experiment_path=path_to_ds,
-                                        vol_idx=vol_to_opt,
-                                        num_of_grad=5,
-                                        slices_to_remove = [0, 81],
-                                        transform=transforms.Compose([ to_float32, ZScoreNormalize3D()]), 
+            to_float32 = Lambda(lambda x: x.type(torch.float32))
+            self.dataset = realSimulationSVRDataset(experiment_path=path_to_ds, 
+                                                    transform=transforms.Compose([ to_float32, ZScoreNormalize3D()]),
+                                                    slices_to_remove=[0,81],
+                                                    num_of_grad=num_of_directions, 
+                                                    vol_indices=predefined_indices,
                                                     )
 
         self.loss = nn.MSELoss()
+        self.mi_loss_fn = GlobalMutualInformationLoss()
         self.loss_weights = loss_weights
         self.image_size = rigid_config['image_size']
+        self.voxel_size = rigid_config['voxel_size']
 
         # set optimizer
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr, weight_decay=0)
@@ -100,11 +104,7 @@ class SVR_solver():
 
 
     def forward(self, data, iter):
-        if self.only_canon_grid:
             return self.forward_canon_grid(data, iter)
-        else:
-            return self.forward_trans_grid(data, iter)
-
 
 
     def fit(self, N_iter):
@@ -166,30 +166,43 @@ class SVR_solver():
     
     def forward_canon_grid(self, data, iter=-1):
 
-        dwi_stacks , stacks_indices , rigid_trans_for_recon = data
+        dwi_stacks, _, stacks_bvecs, _, _, _, _, _, stacks_indices = data
 
         dwi_stacks = [stack.to(self.device) for stack in dwi_stacks]
-        # stack_indices = [idx.to(self.device) for idx in stack_indices]
+        dwi_stacks_order_by_vol = []
+        trans_matrices_order_by_vol = []
+        for v in range(self.model.n_vols): 
+            dwi_stacks_order_by_vol.append(dwi_stacks[v::self.model.n_vols])
+            trans_matrices_order_by_vol.append(self.rigid_trans_for_recon[v::self.model.n_vols])
 
-        warped_stacks, recon_canon, consistency_loss = self.model(self.rigid_trans_for_recon[:,:-1,:], dwi_stacks, stacks_indices)
+        warped_stacks, recon_canon, consistency_loss = self.model(trans_matrices_order_by_vol, dwi_stacks_order_by_vol, stacks_indices)
 
         # if iter%200 == 0:
         #     save_tensor_as_nii(recon_canon.view(128,128,82), f'debug_plots/training_recon_iter{iter}.nii.gz')
         losses = []
-        for i, warped in enumerate(warped_stacks):
-            # compare only the acquired slices for this stack
-            idx = stacks_indices[i]
-            if torch.is_tensor(idx): idx = idx.tolist()
+        MI_losses = []
+        mean_recon_vol = torch.stack(recon_canon).mean(dim=0)
+        for v in range(self.model.n_vols):
+            cur_wrapped = warped_stacks[v]
+            cur_target = dwi_stacks[v::self.model.n_vols]
+            cur_recon = recon_canon[v]
+            MI = self.mi_loss_fn(cur_recon, mean_recon_vol)
+            MI_losses.append(MI)
+            for i, warped in enumerate(cur_wrapped):
+                # compare only the acquired slices for this stack
+                idx = stacks_indices[i]
+                if torch.is_tensor(idx): idx = idx.tolist()
 
-            # assuming stacks are along W (third axis). change indexing if your stacks differ.
-            pred = warped[:, :, idx]                 # [H,W,K]
-            target = dwi_stacks[i].to(pred.device, pred.dtype)
-            losses.append(self.loss(pred,  target))
+                # assuming stacks are along W (third axis). change indexing if your stacks differ.
+                pred = warped[:, :, idx]                 # [H,W,K]
+                target = cur_target[i].to(pred.device, pred.dtype)
+                losses.append(self.loss(pred,  target))
         
         recon_loss = torch.stack(losses).mean()
-        tv_loss = tv3d(recon_canon.unsqueeze(0))
-        curv = curvature_loss(recon_canon)
-        loss_dict = {'recon_loss' : recon_loss, 'tv_reg':tv_loss, 'dc_loss':consistency_loss, 'curv': curv}
+        tv_loss = tv3d(torch.stack(recon_canon).unsqueeze(0))
+        curv = curvature_loss(torch.stack(recon_canon), spacing=self.voxel_size)
+        MI_loss = torch.stack(MI_losses).mean()
+        loss_dict = {'recon_loss' : recon_loss, 'tv_reg':tv_loss, 'dc_loss':consistency_loss, 'curv': curv, 'MI_loss': MI_loss}
         return loss_dict  
 
     def forward_trans_grid(self, data, iter=-1):
@@ -217,6 +230,6 @@ class SVR_solver():
     def get_recon_volumes(self):
     
         recons = self.model.get_recons()
-        save_tensor_as_nii(recons, f'{self.exp_dir_path}/recon_vol.nii.gz')
+        save_tensor_as_nii(torch.stack(recons).permute(1,2,3,0), f'{self.exp_dir_path}/recons.nii.gz')
         return recons
 

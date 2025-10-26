@@ -39,7 +39,7 @@ def find_experiments(root: str) -> List[Tuple[str, str]]:
 
 def main():
     # Allow running this script directly by setting the paths here:
-    experiments_root = "/tcmldrive/NogaK/svr_exps/losses_weights_exps"
+    experiments_root = "/tcmldrive/NogaK/svr_exps/losses_weights_exps/"
     original_path = "/tcmldrive/NogaK/noga_experiment_data/scan1/ep2d_diff_64dir_iso1.6_s2p2_new_8.nii"
     vol_idx = 1
 

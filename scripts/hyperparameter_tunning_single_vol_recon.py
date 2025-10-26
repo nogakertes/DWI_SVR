@@ -71,47 +71,58 @@ if __name__ == "__main__":
 
     # Learning Rate Tuning Experiment
     import numpy as np
+    import itertools
 
-    # Define the set of learning rates to try
-    learning_rates = [0.0001, 0.0005, 0.001, 0.002, 0.005, 0.01]
+    # Hyperparameter tuning for loss weights
 
-    # Use a fixed encoding and network config (from above)
+    # Keep reconstruction loss fixed, tune regularizers
+    recon_weight = 1.0
+    tv_vals = [0.05]
+    dc_vals = [0.1, 1, 10, 100]
+    curv_vals = [0.05]
+
+    combos = list(itertools.product(tv_vals, dc_vals, curv_vals))
+    total = len(combos)
+
+    # fixed model/training params
     encoding_params = recon_config['encoding']
     network_config = recon_config['network']
+    recon_config_trial = {"encoding": encoding_params, "network": network_config}
+    lr = 0.001  # keep a reasonable default learning rate for weight tuning
 
-    # Fix loss weights for all runs
-    fixed_loss_weights = {'recon_loss': 1, 'tv_reg': 0.01, 'dc_loss': 0.1, 'curv': 0.1}
+    def fmt_weight(x):
+        return str(x).replace('.', 'p')
 
-    for i, lr in enumerate(learning_rates):
+    for i, (tv, dc, curv) in enumerate(combos):
         try:
-            exp_name = f'_SVR_single_vol_fullsim_lrtune_{i}_lr{lr}'
-            print(f"Running LR tuning experiment {i+1}/{len(learning_rates)}: {exp_name}")
-
-            recon_config_trial = {
-                "encoding": encoding_params,
-                "network": network_config
+            loss_weights = {
+                'recon_loss': recon_weight,
+                'tv_reg': float(tv),
+                'dc_loss': float(dc),
+                'curv': float(curv)
             }
+            name_suffix = f"tv{fmt_weight(tv)}_dc{fmt_weight(dc)}_curv{fmt_weight(curv)}"
+            exp_name = f"_SVR_single_vol_losswt_tune_{i}_{name_suffix}"
+            print(f"Running loss-weight tuning {i+1}/{total}: {exp_name} -> {loss_weights}")
 
             solver = SVR_solver(
                 case_path,
                 rigid_config,
                 recon_config_trial,
-                affine_matrix_path = '/tcmldrive/NogaK/svr_exps/registration_exps/final_exp_reg_GNN_2025-10-19_09:11:26.783973/pred_rigid_trans.pt',
+                affine_matrix_path='/tcmldrive/NogaK/svr_exps/registration_exps/gnn_hyperparam_hidden64_heads8_layers4_drop0.001_2025-10-19_16:37:47.767831/pred_rigid_trans.pt',
                 only_canon_grid=True,
                 full_sim_ds=False,
                 lr=lr,
                 plot_every=100,
                 vol_to_opt=1,
                 vol_indices=bvec_indices,
-                loss_weights=fixed_loss_weights,
-                save_exp_path='/tcmldrive/NogaK/svr_exps/lr_hyperparam_exps',
+                loss_weights=loss_weights,
+                save_exp_path='/tcmldrive/NogaK/svr_exps/losses_weights_exps',
                 exp_name=exp_name,
                 device=device
             )
             solver.fit(N_iter=5000)
-            # Optionally, save results or metrics for analysis
 
         except Exception as e:
-            print(f"Error running LR tuning experiment {i+1}/{len(learning_rates)}: {exp_name}")
+            print(f"Error running loss-weight tuning {i+1}/{total}: {exp_name}")
             print(e)
-

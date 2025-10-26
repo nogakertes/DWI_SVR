@@ -126,7 +126,7 @@ class ReconNet_canonial_grid(nn.Module):
                     align_corners=True
                 )  # [1,1,D,H,W]
                 warped_list.append(warped[0,0])       # [D,H,W]
-            warped_stacks_all.append(warped_list)     # list of [N_stacks, D,H,W]
+            warped_stacks_all.append(torch.stack(warped_list))     # list of [N_stacks, D,H,W]
 
             # 4) Back-to-canonical consensus (per volume)
             T_c2s_44 = get_inverse_transformation(theta44)       # [N,4,4] canonical->stack
@@ -146,14 +146,14 @@ class ReconNet_canonial_grid(nn.Module):
             consistency_loss = mask_aware_consistency(
                 canon_from_stacks=canon_from_stacks,
                 theta_grid_c2s=theta_grid_c2s,
-                stacks_indices=stacks_indices[v],
+                stacks_indices=stacks_indices,
                 image_size=self.image_size,
                 device=self.device,
-                min_coverage=0.5
+                min_coverage=2
             )
             consistency_losses_all.append(consistency_loss)
 
-        return warped_stacks_all, recon_canons_all, consistency_losses_all
+        return warped_stacks_all, recon_canons_all, torch.mean(torch.stack(consistency_losses_all))
 
     @torch.no_grad()
     def get_recons(self):
